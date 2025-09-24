@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,19 +11,175 @@ import (
 	"net/http"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
+
 	"github.com/gen2brain/beeep"
 )
 
 type App struct {
 	ctx context.Context
+	db  *sql.DB
 }
 
 func NewApp() *App {
-	return &App{}
+	app := &App{}
+	app.initDatabase()
+	return app
+}
+
+type NotificationRequest struct {
+	Title   string `json:"title"`
+	Message string `json:"message"`
+	Icon    string `json:"icon,omitempty"`
+}
+
+type NotificationResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Time    string `json:"time"`
+}
+
+func (a *App) initDatabase() {
+	var err error
+	a.db, err = sql.Open("sqlite3", "./notify.db")
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+
+	createSentTable := `
+	CREATE TABLE IF NOT EXISTS sent_notifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		target TEXT NOT NULL,
+		title TEXT NOT NULL,
+		message TEXT NOT NULL,
+		icon TEXT,
+		success BOOLEAN DEFAULT FALSE,
+		response_message TEXT,
+		sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	// Create received_notifications table
+	createReceivedTable := `
+	CREATE TABLE IF NOT EXISTS received_notifications (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		title TEXT NOT NULL,
+		message TEXT NOT NULL,
+		icon TEXT,
+		source_ip TEXT,
+		received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	if _, err := a.db.Exec(createSentTable); err != nil {
+		log.Fatalf("Failed to create sent_notifications table: %v", err)
+	}
+
+	if _, err := a.db.Exec(createReceivedTable); err != nil {
+		log.Fatalf("Failed to create received_notifications table: %v", err)
+	}
+
+	log.Println("Database initialized successfully")
+}
+
+func (a *App) logSentNotification(target, title, message, icon string, success bool, responseMessage string) {
+	if a.db == nil {
+		log.Printf("Database not initialized, cannot log sent notification")
+		return
+	}
+
+	query := `INSERT INTO sent_notifications (target, title, message, icon, success, response_message) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := a.db.Exec(query, target, title, message, icon, success, responseMessage)
+	if err != nil {
+		log.Printf("Failed to log sent notification: %v", err)
+	}
+}
+
+func (a *App) logReceivedNotification(title, message, icon, sourceIP string) {
+	if a.db == nil {
+		log.Printf("Database not initialized, cannot log received notification")
+		return
+	}
+
+	query := `INSERT INTO received_notifications (title, message, icon, source_ip) VALUES (?, ?, ?, ?)`
+	_, err := a.db.Exec(query, title, message, icon, sourceIP)
+	if err != nil {
+		log.Printf("Failed to log received notification: %v", err)
+	}
+}
+
+func (a *App) GetSentNotifications() ([]map[string]interface{}, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	rows, err := a.db.Query(`SELECT id, target, title, message, icon, success, response_message, sent_at FROM sent_notifications ORDER BY sent_at DESC LIMIT 100`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notifications []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var target, title, message, icon, responseMessage, sentAt string
+		var success bool
+
+		err := rows.Scan(&id, &target, &title, &message, &icon, &success, &responseMessage, &sentAt)
+		if err != nil {
+			continue
+		}
+
+		notifications = append(notifications, map[string]interface{}{
+			"id":               id,
+			"target":           target,
+			"title":            title,
+			"message":          message,
+			"icon":             icon,
+			"success":          success,
+			"response_message": responseMessage,
+			"sent_at":          sentAt,
+		})
+	}
+
+	return notifications, nil
+}
+
+func (a *App) GetReceivedNotifications() ([]map[string]interface{}, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+
+	rows, err := a.db.Query(`SELECT id, title, message, icon, source_ip, received_at FROM received_notifications ORDER BY received_at DESC LIMIT 100`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notifications []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var title, message, icon, sourceIP, receivedAt string
+
+		err := rows.Scan(&id, &title, &message, &icon, &sourceIP, &receivedAt)
+		if err != nil {
+			continue
+		}
+
+		notifications = append(notifications, map[string]interface{}{
+			"id":          id,
+			"title":       title,
+			"message":     message,
+			"icon":        icon,
+			"source_ip":   sourceIP,
+			"received_at": receivedAt,
+		})
+	}
+
+	return notifications, nil
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	appInstance = a
 	http.HandleFunc("/notify", handleNotification)
 	go func() {
 		log.Printf("Starting notification server on port 8080...")
@@ -70,22 +227,14 @@ func (a *App) SendNotification(target, title, message, icon string) string {
 		return fmt.Sprintf("Warning: Could not parse response JSON: %v\nRaw response: %s", err, string(body))
 	}
 	if notifResp.Success {
+		a.logSentNotification(target, title, message, icon, true, notifResp.Message)
 		return fmt.Sprintf("Notification sent successfully! Server time: %s", notifResp.Time)
 	}
+	a.logSentNotification(target, title, message, icon, false, notifResp.Message)
 	return fmt.Sprintf("Notification failed: %s", notifResp.Message)
 }
 
-type NotificationRequest struct {
-	Title   string `json:"title"`
-	Message string `json:"message"`
-	Icon    string `json:"icon,omitempty"`
-}
-
-type NotificationResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	Time    string `json:"time"`
-}
+var appInstance *App
 
 func handleNotification(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -114,6 +263,11 @@ func handleNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Received notification: '%s' - '%s'", notifReq.Title, notifReq.Message)
+
+	if appInstance != nil {
+		appInstance.logReceivedNotification(notifReq.Title, notifReq.Message, notifReq.Icon, r.RemoteAddr)
+	}
+
 	if err := beeep.Notify(notifReq.Title, notifReq.Message, notifReq.Icon); err != nil {
 		log.Printf("Error displaying notification: %v", err)
 		response := NotificationResponse{

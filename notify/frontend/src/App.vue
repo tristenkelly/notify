@@ -1,8 +1,9 @@
 <script lang="ts" setup>
-import HelloWorld from './components/HelloWorld.vue'</script>
+import Notify from './components/notify.vue'
+</script>
 
 <template>
-  <HelloWorld/>
+  <Notify/>
 </template>
 
 <style>
