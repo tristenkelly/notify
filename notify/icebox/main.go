@@ -3,12 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gen2brain/beeep"
@@ -31,59 +29,32 @@ const (
 )
 
 func main() {
-	var (
-		serverMode = flag.Bool("server", false, "Run in server mode (listen for notifications)")
-		clientMode = flag.Bool("send", false, "Send a notification to another machine")
-		target     = flag.String("target", "localhost:"+DefaultPort, "Target machine IP:port (for client mode)")
-		title      = flag.String("title", "Notification", "Notification title")
-		message    = flag.String("message", "", "Notification message")
-		port       = flag.String("port", DefaultPort, "Port to listen on (for server mode)")
-		icon       = flag.String("icon", "", "Path to notification icon")
-	)
-	flag.Parse()
+	// Register notification handler
+	http.HandleFunc("/notify", handleNotification)
+	// Start server in a goroutine
+	go startServer()
 
-	if *serverMode && *clientMode {
-		log.Fatal("Cannot run in both server and client mode simultaneously")
-	}
-
-	if !*serverMode && !*clientMode {
-		fmt.Println("Network Notifier - Send notifications between machines")
-		fmt.Println("\nUsage:")
-		fmt.Println("  Server mode (listen for notifications):")
-		fmt.Println("    ./notifier -server [-port 8080]")
-		fmt.Println("\n  Client mode (send notification):")
-		fmt.Println("    ./notifier -send -target IP:PORT -title \"Hello\" -message \"Test message\"")
-		fmt.Println("\nExamples:")
-		fmt.Println("  # Start server on default port 8080")
-		fmt.Println("  ./notifier -server")
-		fmt.Println("\n  # Send notification to another machine")
-		fmt.Println("  ./notifier -send -target 192.168.1.100:8080 -title \"Alert\" -message \"Important update!\"")
-		fmt.Println("\n  # Start server on custom port")
-		fmt.Println("  ./notifier -server -port 9000")
-		os.Exit(0)
-	}
-
-	if *serverMode {
-		startServer(*port)
-	} else if *clientMode {
-		if *message == "" {
-			log.Fatal("Message is required when sending notifications")
+	// Simple CLI loop for sending notifications as client
+	for {
+		var target, title, message, icon string
+		fmt.Println("Enter target server (host:port), or 'exit' to quit:")
+		fmt.Scanln(&target)
+		if target == "exit" {
+			break
 		}
-		sendNotification(*target, *title, *message, *icon)
+		fmt.Println("Enter notification title:")
+		fmt.Scanln(&title)
+		fmt.Println("Enter notification message:")
+		fmt.Scanln(&message)
+		fmt.Println("Enter icon path (optional, press Enter to skip):")
+		fmt.Scanln(&icon)
+		sendNotification(target, title, message, icon)
 	}
 }
 
-func startServer(port string) {
-	http.HandleFunc("/notify", handleNotification)
-	http.HandleFunc("/health", handleHealth)
-
-	addr := ":" + port
-	fmt.Printf("Notification server starting on http://localhost%s\n", addr)
-	fmt.Printf("Ready to receive notifications at http://localhost%s/notify\n", addr)
-	fmt.Printf("Health check available at http://localhost%s/health\n", addr)
-	fmt.Println("\nPress Ctrl+C to stop the server")
-
-	log.Fatal(http.ListenAndServe(addr, nil))
+func startServer() {
+	log.Printf("Starting notification server on port %s...", DefaultPort)
+	log.Fatal(http.ListenAndServe(":"+DefaultPort, nil))
 }
 
 func handleNotification(w http.ResponseWriter, r *http.Request) {
@@ -135,16 +106,6 @@ func handleNotification(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
-}
-
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "healthy",
-		"time":    time.Now().Format(time.RFC3339),
-		"service": "network-notifier",
-	})
 }
 
 func sendNotification(target, title, message, icon string) {
